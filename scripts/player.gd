@@ -28,6 +28,7 @@ const FRICTION := 1600.0
 const JUMP_VELOCITY := -520.0
 const GRAVITY := 1400.0
 const BULLET_SCENE := preload("res://scenes/bullet.tscn")
+const DeathEffect := preload("res://scripts/death_effect.gd")
 
 # ── 스프라이트 텍스처 세트 (P1/P2) ──
 const P1_TEX := {
@@ -92,14 +93,15 @@ var _reload_bar_bg: ColorRect
 var _reload_bar_fill: ColorRect
 
 # ── 사망 애니메이션 ──
-const DEATH_COLLAPSE_TIME := 0.35   # 쓰러지는 시간
-const DEATH_MELT_TIME := 0.6        # 녹아내리는 시간
-const DEATH_DRIP_TIME := 0.5        # 피 흘러내리는 시간
 var _death_anim_timer := 0.0
-var _death_anim_phase := 0          # 0=없음, 1=쓰러짐, 2=녹아내림, 3=핏자국
+var _death_anim_phase := 0          # 0=없음, 1=이펙트 재생 중
 var _death_pos := Vector2.ZERO
 var _death_color := Color.WHITE
-var _death_drip_node: Node2D = null
+var _last_hit_pos := Vector2.ZERO   # 총알이 맞은 월드 좌표
+var _last_hit_dir := Vector2.RIGHT  # 총알 진행 방향 (정규화)
+var _last_bullet_force := 1.0       # 총알 충격력 (정규화, 1.0 = 기본)
+var _death_vel := Vector2.ZERO      # 사망 직전 속도 (관성 계산용)
+var _death_grounded := true          # 사망 시 지면 접촉 여부
 
 @onready var silhouette: Node2D = $Silhouette
 @onready var torso_pivot: Node2D = $Silhouette/TorsoPivot
@@ -515,6 +517,8 @@ func _apply_die(killer_id: int = 0) -> void:
 	if not is_alive:
 		return
 	is_alive = false
+	_death_vel = velocity
+	_death_grounded = is_on_floor()
 	velocity = Vector2.ZERO
 	_cancel_reload()
 	hit_area.set_deferred("monitoring", false)
@@ -527,8 +531,10 @@ func _apply_die(killer_id: int = 0) -> void:
 	else:
 		_death_pos = global_position
 		_death_color = Color(0.58, 0.48, 0.20) if player_id == 1 else Color(0.55, 0.28, 0.22)
+		_spawn_death_effect()
+		visible = false
 		_death_anim_phase = 1
-		_death_anim_timer = DEATH_COLLAPSE_TIME
+		_death_anim_timer = 3.5  # 래그돌(~1.6) + 정착(0.35) + 녹아내림(1.0) + 여유
 	# 조작 가능한 피어만 카드 UI
 	if is_controllable() and not _death_by_oob:
 		_picking_card = true
@@ -557,89 +563,52 @@ func _tick_respawn(delta: float) -> void:
 
 func _tick_death_anim(delta: float) -> void:
 	_death_anim_timer -= delta
-
-	if _death_anim_phase == 1:
-		# Phase 1: 쓰러짐 — 실루엣을 옆으로 90° 눕힘
-		var t: float = 1.0 - clampf(_death_anim_timer / DEATH_COLLAPSE_TIME, 0.0, 1.0)
-		var target_rot : float = (PI / 2.0) * sign(float(facing))
-		silhouette.rotation = lerpf(0.0, target_rot, t * t)  # ease-in
-		if _death_anim_timer <= 0.0:
-			_death_anim_phase = 2
-			_death_anim_timer = DEATH_MELT_TIME
-
-	elif _death_anim_phase == 2:
-		# Phase 2: 녹아내림 — scale.y 줄이면서 투명해짐 (소금 녹듯이)
-		var t: float = 1.0 - clampf(_death_anim_timer / DEATH_MELT_TIME, 0.0, 1.0)
-		silhouette.scale.y = lerpf(absf(silhouette.scale.y), 0.05, t)
-		modulate.a = lerpf(1.0, 0.0, t * t)
-		if _death_anim_timer <= 0.0:
-			visible = false
-			silhouette.rotation = 0.0
-			silhouette.scale.y = 1.0
-			modulate.a = 1.0
-			_death_anim_phase = 3
-			_death_anim_timer = DEATH_DRIP_TIME
-			_spawn_blood_drip()
-
-	elif _death_anim_phase == 3:
-		# Phase 3: 바닥에 핏자국 흘러내림 (별도 노드)
-		if _death_drip_node and is_instance_valid(_death_drip_node):
-			var t: float = 1.0 - clampf(_death_anim_timer / DEATH_DRIP_TIME, 0.0, 1.0)
-			_update_blood_drip(t)
-		if _death_anim_timer <= 0.0:
-			_death_anim_phase = 0
-			_respawn_timer = 0.6  # 핏자국 후 짧은 대기
+	if _death_anim_timer <= 0.0:
+		_death_anim_phase = 0
+		_respawn_timer = 0.4
 
 
-func _spawn_blood_drip() -> void:
-	# 바닥 위 시체 위치에 피 웅덩이 + 흘러내리기 노드 생성
-	_death_drip_node = Node2D.new()
-	_death_drip_node.global_position = Vector2(_death_pos.x, _death_pos.y)
-	get_tree().current_scene.add_child(_death_drip_node)
+func _spawn_death_effect() -> void:
+	# 각 신체 부위의 텍스처, 로컬 오프셋(Silhouette 기준), 글로벌 정보 수집
+	var parts_info: Array = []
+	var sprite_list: Array = [
+		{"sprite": head, "pivot": head_pivot},
+		{"sprite": neck, "pivot": neck_pivot},
+		{"sprite": torso, "pivot": torso_pivot},
+		{"sprite": arm_l, "pivot": arm_pivot_l},
+		{"sprite": arm_r, "pivot": arm_pivot_r},
+		{"sprite": leg_l, "pivot": leg_pivot_l},
+		{"sprite": leg_r, "pivot": leg_pivot_r},
+	]
+	for part in sprite_list:
+		var spr: Sprite2D = part["sprite"]
+		if spr and spr.texture:
+			parts_info.append({
+				"texture": spr.texture,
+				"global_pos": spr.global_position,
+				"global_rot": spr.global_rotation,
+				"local_offset": spr.position,  # pivot 기준 오프셋
+				"pivot_offset": part["pivot"].position,  # silhouette 기준 오프셋
+			})
 
-	# 바닥 위 웅덩이 (수평 확산)
-	var puddle := ColorRect.new()
-	puddle.size = Vector2(0, 3)
-	puddle.position = Vector2(0, 0)
-	puddle.color = _death_color.darkened(0.3)
-	puddle.color.a = 0.7
-	puddle.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	puddle.name = "Puddle"
-	_death_drip_node.add_child(puddle)
+	# 바닥 Y: 플레이어 충돌 셰이프 하단 (대략 +19px)
+	var floor_y: float = _death_pos.y + 19.0
 
-	# 바닥 옆면으로 흘러내리는 줄기
-	var drip := ColorRect.new()
-	drip.size = Vector2(4, 0)
-	drip.position = Vector2(-2, 3)
-	drip.color = _death_color.darkened(0.4)
-	drip.color.a = 0.6
-	drip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	drip.name = "Drip"
-	_death_drip_node.add_child(drip)
-
-	# 일정 시간 뒤 자동 삭제 타이머
-	var timer := get_tree().create_timer(4.0)
-	timer.timeout.connect(func():
-		if _death_drip_node and is_instance_valid(_death_drip_node):
-			_death_drip_node.queue_free()
-	)
-
-
-func _update_blood_drip(t: float) -> void:
-	if not _death_drip_node or not is_instance_valid(_death_drip_node):
-		return
-	var puddle: ColorRect = _death_drip_node.get_node_or_null("Puddle")
-	var drip: ColorRect = _death_drip_node.get_node_or_null("Drip")
-	if puddle:
-		# 웅덩이 수평 확산
-		var w: float = lerpf(0.0, 28.0, t)
-		puddle.size.x = w
-		puddle.position.x = -w * 0.5
-	if drip:
-		# 아래로 흘러내림
-		var h: float = lerpf(0.0, 18.0, t * t)
-		drip.size.y = h
-		drip.color.a = lerpf(0.6, 0.3, t)
+	var fx := DeathEffect.new()
+	fx.init_data = {
+		"parts": parts_info,
+		"color": _death_color,
+		"floor_y": floor_y,
+		"facing": facing,
+		"body_pos": _death_pos,
+		"hit_pos": _last_hit_pos,
+		"hit_dir": _last_hit_dir,
+		"silhouette_scale_x": silhouette.scale.x,
+		"player_velocity": _death_vel,
+		"was_grounded": _death_grounded,
+		"bullet_force": _last_bullet_force,
+	}
+	get_tree().current_scene.add_child(fx)
 
 
 @rpc("authority", "call_local", "reliable")
@@ -694,6 +663,18 @@ func _on_hit_area_area_entered(area: Area2D) -> void:
 	if shooter_id == player_id:
 		return
 	if is_controllable():
+		# 총알 피격 정보 캡처 (사망 이펙트용)
+		_last_hit_pos = area.global_position
+		if "velocity_vec" in area and area.velocity_vec.length() > 0.1:
+			_last_hit_dir = area.velocity_vec.normalized()
+		else:
+			_last_hit_dir = Vector2.RIGHT * float(sign(area.global_position.x - global_position.x))
+		# 총알 충격력 계산 (속도 × 크기 기반, 1.0 = 기본 총알)
+		_last_bullet_force = 1.0
+		if "velocity_vec" in area:
+			_last_bullet_force = area.velocity_vec.length() / 480.0
+		_last_bullet_force *= area.scale.x
+		_last_bullet_force = clampf(_last_bullet_force, 0.3, 5.0)
 		_death_by_oob = false
 		_request_die(shooter_id)
 		area.queue_free()

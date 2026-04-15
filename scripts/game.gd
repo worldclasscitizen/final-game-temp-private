@@ -162,11 +162,17 @@ var leader_id: int = 0
 var game_over: bool = false
 var transitioning: bool = false
 var ufo_sequence_active: bool = false
+var card_selecting: bool = false   # 카드 선택 중 플래그
 
 
 func _ready() -> void:
 	Engine.time_scale = 1.4
 	process_mode = Node.PROCESS_MODE_ALWAYS  # ESC 입력을 일시정지 중에도 받기 위해
+	# 게임플레이 노드들은 일시정지 시 멈추도록 설정
+	map_root.process_mode = Node.PROCESS_MODE_PAUSABLE
+	players_root.process_mode = Node.PROCESS_MODE_PAUSABLE
+	camera.process_mode = Node.PROCESS_MODE_PAUSABLE
+	background.process_mode = Node.PROCESS_MODE_PAUSABLE
 	_build_rooms()
 	_spawn_players()
 	winner_label.visible = false
@@ -1254,7 +1260,7 @@ func _process(delta: float) -> void:
 		return
 	if game_over:
 		return
-	if transitioning or ufo_sequence_active:
+	if transitioning or ufo_sequence_active or card_selecting:
 		return
 	if players.size() != 2:
 		return
@@ -1537,7 +1543,14 @@ func _on_card_offered(player: Node, card_ids: Array) -> void:
 	var ui: Control = CARD_UI_SCENE.instantiate()
 	ui.setup(player, card_ids)
 	ui_layer.add_child(ui)
+	# 카드 선택 중 게임 일시정지 (죽는 플레이어만 ALWAYS로 — 사망 애니메이션 계속 재생)
+	get_tree().paused = true
+	card_selecting = true
+	player.process_mode = Node.PROCESS_MODE_ALWAYS
 	ui.card_picked.connect(func(card_id: String):
+		player.process_mode = Node.PROCESS_MODE_INHERIT
+		get_tree().paused = false
+		card_selecting = false
 		player.on_card_selected(card_id)
 	)
 

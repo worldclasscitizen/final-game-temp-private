@@ -16,15 +16,15 @@ extends Area2D
 ##   speed_mult / size_mult / homing / bounces / pierces (기존)
 ##   thrust_time_add / gravity_scale_add / drag_scale_add (확장)
 
-const BASE_SPEED := 780.0
-const GRAVITY := 980.0
-const DRAG := 1.6
+const BASE_SPEED := 480.0
+const GRAVITY := 1100.0
+const DRAG := 2.8
 const VERT_DRAG_RATIO := 0.3   # 수직 드래그 비율 (중력 가속 허용)
-const THRUST_FORCE := 850.0    # 초반 직진 유지 (너무 강하지 않게)
-const THRUST_DURATION := 0.35  # 추력 지속 시간
+const THRUST_FORCE := 520.0    # 초반 직진 유지 (짧고 약하게)
+const THRUST_DURATION := 0.2   # 추력 지속 시간 (짧게)
 const THRUST_FADE_RATIO := 0.45  # 추력 마지막 45% 에서 페이드아웃
-const GRAVITY_SUPPRESS := 0.08  # 추력 활성 중 중력 억제 비율 (8%만 적용)
-const GRAVITY_RAMP_TIME := 0.20 # 추력 종료 후 중력이 100%까지 올라가는 시간
+const GRAVITY_SUPPRESS := 0.12  # 추력 활성 중 중력 억제 비율 (12%만 적용)
+const GRAVITY_RAMP_TIME := 0.12 # 추력 종료 후 중력이 100%까지 올라가는 시간 (빠르게)
 
 # OOB 안전 삭제 (맵 범위를 크게 벗어났을 때만)
 const OOB_MARGIN := 800.0
@@ -78,6 +78,7 @@ func setup(angle: float, _shooter_id: int, stats: Dictionary) -> void:
 
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_PAUSABLE
 	body_entered.connect(_on_body_entered)
 
 
