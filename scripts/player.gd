@@ -52,6 +52,12 @@ const BASE_MAG_SIZE := 1        # 기본 탄창 크기
 const P2_AIM_TILT := PI / 6    # 30도
 const RESPAWN_IMMUNITY := 1.0  # 리스폰 직후 무적시간(초)
 
+# ── 2-bone IK (팔 관절) ──
+const IK_MAX_BEND := 1.0       # 최대 팔꿈치 각도 (~57°)
+const IK_NEAR_DIST := 12.0     # 이 거리 이하: 최대 접힘
+const IK_FAR_DIST := 40.0      # 이 거리 이상: 완전히 펴짐
+const IK_LERP := 10.0          # 팔꿈치 스무딩 속도
+
 # 애니메이션
 const FACING_LERP := 14.0
 const RUN_CYCLE_SPEED := 14.0   # rad/sec, full speed 기준
@@ -91,6 +97,9 @@ var _reload_duration: float = BASE_RELOAD_TIME
 var _ammo_dots: Array[ColorRect] = []
 var _reload_bar_bg: ColorRect
 var _reload_bar_fill: ColorRect
+var _forearm_pivot: Node2D
+var _forearm: Sprite2D
+var _ik_elbow_bend := 0.0
 
 # ── 사망 애니메이션 ──
 var _death_anim_timer := 0.0
@@ -141,8 +150,38 @@ func _ready() -> void:
 	_update_card_count()
 	hit_area.area_entered.connect(_on_hit_area_area_entered)
 	_recalculate_gun_stats()
+	_setup_arm_ik()
 	_build_ammo_dots()
 	_build_reload_bar()
+
+
+func _setup_arm_ik() -> void:
+	# 오른팔을 상완(6px) + 전완(6px)으로 분리하고 팔꿈치 피벗 삽입
+	arm_r.region_enabled = true
+	arm_r.region_rect = Rect2(0, 0, 2, 6)
+
+	# 팔꿈치 피벗 (상완 끝)
+	_forearm_pivot = Node2D.new()
+	_forearm_pivot.name = "ForearmPivot"
+	_forearm_pivot.position = Vector2(0, 6)
+	arm_pivot_r.add_child(_forearm_pivot)
+
+	# 전완 스프라이트 (팔 텍스처 하반부)
+	_forearm = Sprite2D.new()
+	_forearm.name = "Forearm"
+	_forearm.texture = arm_r.texture
+	_forearm.region_enabled = true
+	_forearm.region_rect = Rect2(0, 6, 2, 6)
+	_forearm.position = Vector2(-1, 0)
+	_forearm.centered = false
+	_forearm.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	_forearm_pivot.add_child(_forearm)
+
+	# 무기를 전완 피벗 아래로 이동
+	weapon.get_parent().remove_child(weapon)
+	_forearm_pivot.add_child(weapon)
+	# 그립(-X=화면 아래)이 전완 아래로, 총열(+X쪽)이 팔 축 근처로 정렬
+	weapon.position = Vector2(-3, 6)
 
 
 func _update_color() -> void:
@@ -164,6 +203,8 @@ func _update_color() -> void:
 		leg_r.texture = tex["leg"]
 	if weapon:
 		weapon.texture = WEAPON_TEX
+	if _forearm and arm_r:
+		_forearm.texture = arm_r.texture
 	# 모든 노드의 modulate 보장 (사망 애니메이션 복원용)
 	if silhouette:
 		silhouette.modulate = Color.WHITE
@@ -172,7 +213,7 @@ func _update_color() -> void:
 		if pivot:
 			pivot.modulate = Color.WHITE
 			pivot.self_modulate = Color.WHITE
-	for sprite in [head, neck, torso, arm_l, arm_r, leg_l, leg_r, weapon]:
+	for sprite in [head, neck, torso, arm_l, arm_r, leg_l, leg_r, weapon, _forearm]:
 		if sprite:
 			sprite.modulate = Color.WHITE
 			sprite.self_modulate = Color.WHITE
@@ -268,9 +309,9 @@ func _handle_input(delta: float) -> void:
 		_shot_timer = SHOT_INTERVAL
 		_ammo -= 1
 		_update_ammo_dots()
-		# 총구 위치: ArmPivotR 로컬 (0, 29)을 글로벌로 변환
-		var muzzle_local := Vector2(0, 29.0)
-		var shoot_pos := arm_pivot_r.global_transform * muzzle_local
+		# 총구 위치: ForearmPivot 로컬 (0, 17)을 글로벌로 변환
+		var muzzle_forearm := Vector2(0, 17.0)
+		var shoot_pos := _forearm_pivot.global_transform * muzzle_forearm
 		var cards_snapshot := cards.duplicate()
 		if Network.is_online():
 			_fire_bullet.rpc(shoot_pos, aim_angle, player_id, cards_snapshot)
@@ -316,11 +357,12 @@ func _build_ammo_dots() -> void:
 		if is_instance_valid(dot):
 			dot.queue_free()
 	_ammo_dots.clear()
-	# Weapon 은 ArmPivotR 자식, y=12~30(총열). 도트는 총열 '위'에 배치.
-	# ArmPivotR 로컬 좌표계에서 총이 +Y 방향으로 뻗어 있으므로,
-	# 총열 "윗면" = -X 방향. 총구(y≈29)와 가늠좌(y≈14) 사이 위쪽 공간.
-	var barrel_start := 14.0
-	var barrel_end := 28.0
+	if not is_instance_valid(_forearm_pivot):
+		return
+	# 무기는 ForearmPivot 자식. 총열(barrel) 구간: ForearmPivot 로컬 y≈11~17.
+	# +X = 화면 위(총열 윗면) 방향에 도트 배치.
+	var barrel_start := 11.0
+	var barrel_end := 17.0
 	var count: int = _mag_size
 	if count <= 0:
 		return
@@ -329,10 +371,10 @@ func _build_ammo_dots() -> void:
 		var dot := ColorRect.new()
 		dot.size = Vector2(2, 2)
 		var dy: float = barrel_start + spacing * (float(i) + 0.5) - 1.0
-		dot.position = Vector2(-4.0, dy)  # -4: 총열 왼쪽(=위) 표면
+		dot.position = Vector2(2.0, dy)  # +2: 총열 윗면(+X=화면 위)
 		dot.color = Color(1, 1, 1, 0.9)
 		dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		arm_pivot_r.add_child(dot)
+		_forearm_pivot.add_child(dot)
 		_ammo_dots.append(dot)
 	_update_ammo_dots()
 
@@ -480,15 +522,51 @@ func _apply_idle_pose(delta: float) -> void:
 
 
 ## 오른팔(총 든 팔) 이 aim_angle 방향을 향하도록 로컬 rotation 설정.
-## ArmPivotR 은 Silhouette 자식. Silhouette.scale.x 가 음수이면 반사됨.
-## Arm 의 기본 방향은 +Y (아래) 이므로:
-##   scale.x > 0 : local_rot = aim_angle - PI/2
-##   scale.x < 0 : local_rot = PI/2 - aim_angle   (반사 보정)
+## 2-bone IK: 어깨 + 팔꿈치. 마우스가 가까우면 팔꿈치를 접어 양손 파지 자세.
+## 핵심: shoulder_rot + forearm_rot = 기본 조준 회전 (총구 방향 보존)
+##   shoulder = base_rot + bend,  forearm = -bend  →  합 = base_rot
 func _apply_aim_arm() -> void:
-	if facing >= 0:
-		arm_pivot_r.rotation = aim_angle - PI / 2.0
+	# 어깨-마우스 거리 → 팔꿈치 접힘량
+	var shoulder_pos := arm_pivot_r.global_position
+	var mouse_pos := get_global_mouse_position()
+	var dist := shoulder_pos.distance_to(mouse_pos)
+
+	var t := clampf((dist - IK_NEAR_DIST) / (IK_FAR_DIST - IK_NEAR_DIST), 0.0, 1.0)
+	var target_bend := IK_MAX_BEND * (1.0 - t)
+
+	var dt := get_physics_process_delta_time()
+	if dt > 0.0:
+		_ik_elbow_bend = lerpf(_ik_elbow_bend, target_bend, clampf(IK_LERP * dt, 0.0, 1.0))
 	else:
-		arm_pivot_r.rotation = PI / 2.0 - aim_angle
+		_ik_elbow_bend = target_bend
+
+	# 어깨 + 팔꿈치 회전 (총구 방향은 항상 aim_angle 유지)
+	if facing >= 0:
+		arm_pivot_r.rotation = aim_angle - PI / 2.0 + _ik_elbow_bend
+		_forearm_pivot.rotation = -_ik_elbow_bend
+	else:
+		arm_pivot_r.rotation = PI / 2.0 - aim_angle - _ik_elbow_bend
+		_forearm_pivot.rotation = _ik_elbow_bend
+
+	# 왼팔: 접힘이 클수록 무기 쪽으로 뻗어 양손 파지
+	_apply_left_arm_track()
+
+
+## 왼팔이 무기 중간점을 향해 뻗도록 회전 (양손 파지 연출).
+## 접힘량(_ik_elbow_bend)에 비례하여 기존 애니메이션과 블렌딩.
+func _apply_left_arm_track() -> void:
+	if _ik_elbow_bend < 0.05:
+		return  # 거의 펴져 있으면 왼팔은 기존 포즈 유지
+
+	# 무기 중간점을 Silhouette 로컬 좌표로 변환
+	var weapon_mid_global: Vector2 = _forearm_pivot.global_transform * Vector2(0, 8)
+	var weapon_in_sil: Vector2 = silhouette.global_transform.affine_inverse() * weapon_mid_global
+	var left_shoulder_local: Vector2 = arm_pivot_l.position
+	var to_weapon: Vector2 = weapon_in_sil - left_shoulder_local
+	var target_rot: float = to_weapon.angle() - PI / 2.0
+
+	var blend: float = clampf(_ik_elbow_bend / IK_MAX_BEND, 0.0, 1.0)
+	arm_pivot_l.rotation = lerpf(arm_pivot_l.rotation, target_rot, blend)
 
 
 ## game.gd 에서 카메라 기준 바깥으로 판정하면 호출됨
@@ -580,6 +658,9 @@ func _spawn_death_effect() -> void:
 		{"sprite": leg_l, "pivot": leg_pivot_l},
 		{"sprite": leg_r, "pivot": leg_pivot_r},
 	]
+	# 전완(IK) 도 사망 이펙트에 포함
+	if _forearm and is_instance_valid(_forearm):
+		sprite_list.append({"sprite": _forearm, "pivot": _forearm_pivot})
 	for part in sprite_list:
 		var spr: Sprite2D = part["sprite"]
 		if spr and spr.texture:
@@ -623,6 +704,9 @@ func _apply_respawn(pos: Vector2) -> void:
 	silhouette.rotation = 0.0
 	silhouette.scale = Vector2(_facing_visual, 1.0)
 	modulate = Color.WHITE
+	_ik_elbow_bend = 0.0
+	if _forearm_pivot:
+		_forearm_pivot.rotation = 0.0
 	_update_color()  # 사망 애니메이션에서 변경된 색상/투명도 완전 복원
 	_refill_ammo()
 	hit_area.set_deferred("monitoring", true)
@@ -706,7 +790,7 @@ func _create_single_bullet(pos: Vector2, angle: float, sid: int, stats: Dictiona
 	var b := BULLET_SCENE.instantiate()
 	# add_child 가 되어야 @onready 가 채워지므로 setup 은 트리 진입 뒤에 호출
 	get_tree().current_scene.add_child(b)
-	var offset_dist: float = 28.0 * float(stats.get("size_mult", 1.0))
+	var offset_dist: float = 20.0 * float(stats.get("size_mult", 1.0))
 	b.global_position = pos + Vector2.RIGHT.rotated(angle) * offset_dist
 	b.setup(angle, sid, stats)
 
@@ -723,3 +807,4 @@ func _announce_win_local_or_rpc(winner_id: int) -> void:
 @rpc("any_peer", "call_local", "reliable")
 func _announce_win(winner_id: int) -> void:
 	player_won.emit(winner_id)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   

@@ -18,10 +18,10 @@ extends Area2D
 
 const BASE_SPEED := 480.0
 const GRAVITY := 1100.0
-const DRAG := 2.8
+const DRAG := 2.65
 const VERT_DRAG_RATIO := 0.3   # 수직 드래그 비율 (중력 가속 허용)
 const THRUST_FORCE := 520.0    # 초반 직진 유지 (짧고 약하게)
-const THRUST_DURATION := 0.2   # 추력 지속 시간 (짧게)
+const THRUST_DURATION := 0.23  # 추력 지속 시간
 const THRUST_FADE_RATIO := 0.45  # 추력 마지막 45% 에서 페이드아웃
 const GRAVITY_SUPPRESS := 0.12  # 추력 활성 중 중력 억제 비율 (12%만 적용)
 const GRAVITY_RAMP_TIME := 0.12 # 추력 종료 후 중력이 100%까지 올라가는 시간 (빠르게)

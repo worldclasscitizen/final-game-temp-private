@@ -244,17 +244,6 @@ func _build_card(x: float, y: float, data: Dictionary, idx: int) -> Control:
 	desc.size = Vector2(CARD_W - 20, 56)
 	root.add_child(desc)
 
-	# P2 로컬만 키 힌트
-	if _is_p2_local:
-		var kl := Label.new()
-		kl.text = "[%d]" % (idx + 7)
-		kl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		kl.add_theme_font_size_override("font_size", 14)
-		kl.add_theme_color_override("font_color", Color(0.45, 0.45, 0.5))
-		kl.position = Vector2(0, CARD_H - 32)
-		kl.size = Vector2(CARD_W, 24)
-		root.add_child(kl)
-
 	# 모서리 장식
 	for corner in [Vector2(12, 48), Vector2(CARD_W - 28, CARD_H - 32)]:
 		var mini := Label.new()
@@ -264,11 +253,6 @@ func _build_card(x: float, y: float, data: Dictionary, idx: int) -> Control:
 		mini.position = corner
 		mini.size = Vector2(16, 16)
 		root.add_child(mini)
-
-	# 인터랙션
-	root.gui_input.connect(_on_card_input.bind(idx))
-	root.mouse_entered.connect(_on_hover_enter.bind(idx))
-	root.mouse_exited.connect(_on_hover_exit.bind(idx))
 
 	return root
 
@@ -364,49 +348,31 @@ func _rect(parent: Control, x: float, y: float, w: float, h: float, c: Color) ->
 
 
 # ══════════════════════════════════════════════════════════════
-# 입력
+# 입력 — gui_input 대신 _input 으로 처리 (pause 중에도 확실히 작동)
 # ══════════════════════════════════════════════════════════════
 
-func _on_card_input(event: InputEvent, idx: int) -> void:
+## 마우스 좌표로 카드 인덱스 반환 (없으면 -1)
+func _card_under_mouse() -> int:
+	for i in range(_card_roots.size() - 1, -1, -1):
+		var card: Control = _card_roots[i]
+		if not card.visible or card.modulate.a < 0.1:
+			continue
+		var local: Vector2 = card.get_local_mouse_position()
+		if Rect2(Vector2.ZERO, card.size).has_point(local):
+			return i
+	return -1
+
+
+func _input(event: InputEvent) -> void:
 	if _picked:
 		return
+
+	# 모든 플레이어: 마우스 클릭
 	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		if _is_p2_local:
-			return
-		_pick(idx)
-
-
-func _on_hover_enter(idx: int) -> void:
-	if _picked:
-		return
-	_hovered_idx = idx
-	# 호버 카드를 앞으로
-	if idx >= 0 and idx < _card_roots.size():
-		_card_roots[idx].z_index = 1
-
-
-func _on_hover_exit(idx: int) -> void:
-	if _picked:
-		return
-	if _hovered_idx == idx:
-		_hovered_idx = -1
-	if idx >= 0 and idx < _card_roots.size():
-		_card_roots[idx].z_index = 0
-
-
-func _unhandled_input(event: InputEvent) -> void:
-	if _picked:
-		return
-	if not (event is InputEventKey) or not event.pressed or event.echo:
-		return
-	# P2 로컬만 키보드 입력
-	if _is_p2_local:
-		if event.is_action("p2_card_pick_1"):
-			_pick(0)
-		elif event.is_action("p2_card_pick_2"):
-			_pick(1)
-		elif event.is_action("p2_card_pick_3"):
-			_pick(2)
+		var idx := _card_under_mouse()
+		if idx >= 0:
+			get_viewport().set_input_as_handled()
+			_pick(idx)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -451,6 +417,16 @@ func _process(delta: float) -> void:
 # ══════════════════════════════════════════════════════════════
 
 func _update_hover(delta: float) -> void:
+	# 마우스 위치로 호버 카드 판정
+	if not _picked:
+		var new_hover := _card_under_mouse()
+		if new_hover != _hovered_idx:
+			if _hovered_idx >= 0 and _hovered_idx < _card_roots.size():
+				_card_roots[_hovered_idx].z_index = 0
+			_hovered_idx = new_hover
+			if _hovered_idx >= 0 and _hovered_idx < _card_roots.size():
+				_card_roots[_hovered_idx].z_index = 1
+
 	for i in _card_states.size():
 		var st: Dictionary = _card_states[i]
 		var card: Control = _card_roots[i]
@@ -465,6 +441,12 @@ func _update_hover(delta: float) -> void:
 
 		card.scale = Vector2(st["cur_scale"], st["cur_scale"])
 		card.position.y = float(st["base_y"]) - float(st["cur_lift"])
+
+		# 마우스 커서 변경
+		if hovered:
+			card.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+		else:
+			card.mouse_default_cursor_shape = Control.CURSOR_ARROW
 
 		# 글로우 배경
 		var glow: ColorRect = st["glow_bg"]
@@ -663,11 +645,9 @@ func _finish_pick() -> void:
 # 빛줄기
 # ══════════════════════════════════════════════════════════════
 
-func _build_rays(card: Control) -> void:
-	var center := Vector2(
-		card.position.x + CARD_W * 0.5,
-		card.position.y + CARD_H * 0.5
-	)
+func _build_rays(_card: Control) -> void:
+	# 카드가 이동할 화면 중앙 기준으로 빛줄기 생성
+	var center := Vector2(_screen_w * 0.5, _screen_h * 0.5)
 	_rays_container.pivot_offset = center
 
 	var ray_count := 14
